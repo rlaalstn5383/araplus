@@ -5,16 +5,23 @@ from django.core.paginator import Paginator
 import diff_match_patch
 from django.db.models import Q
 from apps.board.forms import *
+from apps.session.models import *
 from itertools import izip
 from notifications import notify
+from django.forms.models import model_to_dict
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
 from django.utils import timezone
 from django.utils.encoding import uri_to_iri, iri_to_uri
 from django.utils.http import urlquote
+
+import cache
+from datetime import datetime
+
 import django_summernote.models as summernote
 import re
 import os
+import json
 
 
 imtag_regex = re.compile("<img.+?src=[\"'](.+?)[\"'].*?>")
@@ -30,6 +37,7 @@ POINTS_VOTED_DOWN = -2
 def _get_post_list(request, board_url='', item_per_page=15, trace=False):
     # Adult filter 현재 사용하지 않음.
     # adult_filter = request.GET.get('adult_filter')
+    request.user.userprofile = UserProfile.objects.get(user_id = 1)
     best_filter = bool(request.GET.get('best', False))
     page = int(request.GET.get('page', 1))
     search_tag = request.GET.get('tag', '')
@@ -37,67 +45,96 @@ def _get_post_list(request, board_url='', item_per_page=15, trace=False):
     search_content = request.GET.get('content', '')  # title + content
     search_nickname = request.GET.get('nickname', '')
     search_category = request.GET.get('category', '')
-    if board_url != 'all':
-        try:
-            board = Board.objects.get(url=board_url)
-        except:
-            return ([], [], None, None)  # Wrong board request
-    if trace:
-        board_post_notice = []
-        board_post = request.user.userprofile.board_post.all()
-    else:
-        if board_url == 'all':
-            board_post_notice = BoardPost.objects.filter(
-                is_notice=True,
-                board__is_deleted=False,
-                board__is_official=True)
-            board_post = BoardPost.objects.filter(
-                board__is_deleted=False,
-                board__is_official=True)
+
+    t1 = datetime.now()
+    cache_key = '_'.join((board_url, str(best_filter), str(page), search_tag, search_title, search_content, search_nickname, search_category))
+    result = cache.get(cache_key)
+    if not result:
+        if board_url != 'all':
+            try:
+                board = Board.objects.get(url=board_url)
+            except:
+                return ([], [], None, None)  # Wrong board request
+        if trace:
+            board_post_notice = []
+            board_post = request.user.userprofile.board_post.all()
         else:
-            board_post_notice = BoardPost.objects.filter(is_notice=True,
-                                                         board=board)
-            board_post = BoardPost.objects.filter(board=board)
-    # search
-    if best_filter:
-        board_post = board_post.filter(is_best=True)
-        board_post_notice = board_post_notice.filter(is_best=True)
-    
-    if search_tag:
-        board_post = board_post.filter(hashtag__tag_name=search_tag)
-        board_post_notice = board_post_notice.filter(hashtag__tag_name=search_tag)
+            if board_url == 'all':
+                board_post_notice = BoardPost.objects.filter(
+                    is_notice=True,
+                    board__is_deleted=False,
+                    board__is_official=True)
+                board_post = BoardPost.objects.filter(
+                    board__is_deleted=False,
+                    board__is_official=True)
+            else:
+                board_post_notice = BoardPost.objects.filter(is_notice=True,
+                                                             board=board)
+                board_post = BoardPost.objects.filter(board=board)
+        # search
+        if best_filter:
+            board_post = board_post.filter(is_best=True)
+            board_post_notice = board_post_notice.filter(is_best=True)
+        
+        if search_tag:
+            board_post = board_post.filter(hashtag__tag_name=search_tag)
+            board_post_notice = board_post_notice.filter(hashtag__tag_name=search_tag)
 
-    if search_title:
-        board_post = board_post.filter(title__contains=search_title)
-        board_post_notice = board_post_notice.filter(title__contains=search_title)
+        if search_title:
+            board_post = board_post.filter(title__contains=search_title)
+            board_post_notice = board_post_notice.filter(title__contains=search_title)
 
-    if search_content:
-        board_post = board_post.filter(
-            Q(board_content__content__contains=search_content)
-            | Q(title__contains=search_content))
-        board_post_notice = board_post_notice.filter(
-            Q(board_content__content__contains=search_content)
-            | Q(title__contains=search_content))
+        if search_content:
+            board_post = board_post.filter(
+                Q(board_content__content__contains=search_content)
+                | Q(title__contains=search_content))
+            board_post_notice = board_post_notice.filter(
+                Q(board_content__content__contains=search_content)
+                | Q(title__contains=search_content))
 
-    if search_nickname:
-        board_post = board_post.filter(author__nickname=search_nickname,
-                                       board_content__is_anonymous=None)
-        board_post_notice = board_post_notice.filter(author__nickname=search_nickname,
-                                       board_content__is_anonymous=None)
-    if search_category:
-        board_post = board_post.filter(board_category__name=search_category)
-        board_post_notice = board_post_notice.filter(board_category__name=search_category) 
-    board_post_notice = board_post_notice[:5]
-    post_paginator = Paginator(board_post, item_per_page)
-    post_list = []
-    notice_list = []
-    post_paged = post_paginator.page(page)
-    current_page = post_paged.number
-    for post in post_paged:
-        post_list += [[post, post.get_is_read(request)]]
-    for notice in board_post_notice:
-        notice_list += [[notice, notice.get_is_read(request)]]
-    return notice_list, post_list, post_paginator.page_range, current_page
+        if search_nickname:
+            board_post = board_post.filter(author__nickname=search_nickname,
+                                           board_content__is_anonymous=None)
+            board_post_notice = board_post_notice.filter(author__nickname=search_nickname,
+                                           board_content__is_anonymous=None)
+        if search_category:
+            board_post = board_post.filter(board_category__name=search_category)
+            board_post_notice = board_post_notice.filter(board_category__name=search_category) 
+        board_post_notice = board_post_notice[:5]
+        post_paginator = Paginator(board_post, item_per_page)
+        post_list = []
+        notice_list = []
+        post_paged = post_paginator.page(page)
+        current_page = post_paged.number
+        page_range = post_paginator.page_range
+
+
+        for post in post_paged:
+            is_read = post.get_is_read(request)
+            if is_read:
+                post_list += [[model_to_dict(post), model_to_dict(is_read)]]
+            else:
+                post_list += [[model_to_dict(post), None]]
+        for notice in board_post_notice:
+            is_read = notice.get_is_read(request)
+            if is_read:
+                notice_list += [[model_to_dict(notice), model_to_dict(is_read)]]
+            else:
+                notice_list += [[model_to_dict(notice), None]]
+        cache.set(cache_key, json.dumps((notice_list, post_list, page_range, current_page), 1))
+    else:
+        notice_list, post_list, page_range, current_page = json.loads(result)
+    t2 = datetime.now()
+    if result:
+        result = 1
+    else:
+        result = 0
+    f = open('result.txt', 'a')
+    f.write('%d,%d\n' %((t2 - t1).microseconds, result))
+    print (t2 - t1).microseconds, result
+
+
+    return notice_list, post_list, page_range, current_page
 
 
 def _get_querystring(request, *args):

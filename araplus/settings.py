@@ -140,3 +140,6 @@ SUMMERNOTE_CONFIG = {
     'attachment_filesize_limit': 1024 * 1024,
     # 'attachement_storage_class': default_storage,
 }
+
+CACHE_URL = '127.0.0.1'
+CACHE_SERVICE_CODE = 'kao'
